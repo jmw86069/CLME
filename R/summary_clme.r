@@ -5,6 +5,20 @@
 #' @param object an object of class \code{clme}.
 #' @param nsim the number of bootstrap samples to use for inference.
 #' @param seed the value for the seed of the random number generator.
+#'        Note that each bootstrap iteration defines a seed, starting at
+#'        the given seed and proceeding in order. This strategy is a small
+#'        change from previous processing, but is used here so that
+#'        results are identical when comparing non-parallel to parallel
+#'        processing of bootstraps. Each bootstrap simulation receives a
+#'        unique and consistent seed for non-parallel and parallel
+#'        processing.
+#' @param useParallel logical. Indicates whether to run bootstraps using
+#'        doParallel. The number of cpu cores is determined by the helper
+#'        function decide_clme_cores() which uses useFraction=0.8 to use up to
+#'        80% of detected cpu cores. To modify, supply a different value for
+#'        useFraction, which will be passed along to decide_clme_cores().
+#'        Alternatively, you can set the number of cores explicitly using
+#'        the useCores parameter.
 #' @param verbose vector of logicals. First element will print progress for bootstrap test,
 #'        second element is passed to the EM algorithm for every bootstrap sample.
 #' @param ... additional arguments passed to other functions.
@@ -37,10 +51,22 @@
 #' @method summary clme
 #' @export
 #' 
-summary.clme <- function( object, nsim=1000, seed=42, verbose=c(FALSE,FALSE), ... ){
+summary.clme <- function(
+  object,
+  nsim=1000,
+  seed=42,
+  useParallel=FALSE,
+  verbose=c(FALSE,FALSE),
+  ... )
+{
   
   if( !is.clme(object) ){ stop("'object' is not of class clme")}
   
+
+  if (useParallel) {
+    decide_clme_cores(..., verbose=head(verbose,1));
+  }
+
   ## Extract some values from the fitted object
   cust_const  <- object$cust_const
   all_pair    <- object$all_pair
@@ -109,61 +135,148 @@ summary.clme <- function( object, nsim=1000, seed=42, verbose=c(FALSE,FALSE), ..
     
     mprint <- round( seq( 1 , round(nsim2*0.9), length.out=10 ) )
     
-    for( m in 1:nsim2 ){
-      
-      if( verbose[1]==TRUE & (m %in% mprint) ){
-        print( paste( "Bootstrap Iteration " , m , " of " , nsim2 , sep=""))
+    if (!useParallel) {
+      ## for() processing
+
+      for( m in 1:nsim2 ){
+
+        ## We now set the seed for each iteration, to ensure that
+        ## output without parallel processing is identical to output
+        ## with parallel processing.
+        if (head(verbose, 1)) {
+          print(paste0("set.seed(", m + seed, ")"));
+        }
+        set.seed(m + seed);
+        
+        if( verbose[1]==TRUE & (m %in% mprint) ){
+          print( paste( "Bootstrap Iteration " , m , " of " , nsim2 , sep=""))
+        }
+        
+        ## Loop through the search grid
+        ts.boot <- -Inf
+        
+        for( mnk in 1:MNK ){
+          if( cust_const==FALSE ){
+            grid.row <- list( order=search.grid[mnk,1], node=search.grid[mnk,3],
+                              decreasing=search.grid[mnk,2] )
+            loop.const <- create.constraints( P1=P1, constraints=grid.row )
+          }
+          
+          clme.temp <- clme_em( Y=Y_boot[,m], X1=X1, X2=X2, U=U, Nks=object$gfix,
+                                Qs=Qs, constraints=loop.const, mq.phi=mq.phi,
+                                tsf=tsf, tsf.ind=tsf.ind, mySolver=object$mySolver,
+                                verbose=verbose[2], all_pair=all_pair, dvar=object$ssq, ... )
+          
+          idx <- which(clme.temp$ts.glb > ts.boot)
+          if( length(idx)>0 ){
+            ts.boot[idx] <- clme.temp$ts.glb[idx]
+          }
+          
+          update.ind <- (MNK==1) + (mnk == est_order)
+          if( update.ind>0 ){
+            ts.ind.boot <- clme.temp$ts.ind 
+          }
+
+        }
+        
+        # Compute p-values
+        if( all_pair==TRUE ){
+          p.value  <- p.value  + 1*( ts.boot    >= abs(object$ts.glb) ) + 1*( ts.boot    <= -abs(object$ts.glb) )
+          pval.ind <- pval.ind + 1*(ts.ind.boot >= abs(object$ts.ind) ) + 1*(ts.ind.boot <= -abs(object$ts.ind) )
+        } else{
+          # The default / original: one-sided inference
+          p.value  <- p.value  + 1*( ts.boot    >= object$ts.glb )
+          pval.ind <- pval.ind + 1*(ts.ind.boot >= object$ts.ind )
+        }
+        
+        
+        # Collect test stats
+        TS.boot[m,]     <- ts.boot
+        TS.boot.ind[m,] <- ts.ind.boot
+        
       }
-      
-      ## Loop through the search grid
-      ts.boot <- -Inf
-      
-      for( mnk in 1:MNK ){
-        if( cust_const==FALSE ){
-          grid.row <- list( order=search.grid[mnk,1], node=search.grid[mnk,3],
-                            decreasing=search.grid[mnk,2] )
-          loop.const <- create.constraints( P1=P1, constraints=grid.row )
+
+      object$p.value     <- p.value/nsim2
+      object$p.value.ind <- pval.ind/nsim2
+
+    } else {
+      ## foreach() processing
+      ##
+      ## PvalueM is a binary matrix, indicating whether the p.value
+      ## criteria is met. The colSums() of this matrix will be used
+      ## to generate the values p.value and pval.ind in the for() loop
+      ## above.
+      ## Here, we chose to use iter(by="col") which processes one column
+      ## at a time, instead of using chunks of columns. The chunks of columns
+      ## approach did not improve performance.
+      PvalueM <- foreach(Y_boot_col=iter(Y_boot, by="col"),
+           m=seq_len(ncol(Y_boot)),
+          .packages=c('CLME'),
+          .combine='rbind') %dopar% {
+
+        if (head(verbose, 1)) {
+          print(paste0("set.seed(", m + seed, ")"));
         }
-        
-        clme.temp <- clme_em( Y=Y_boot[,m], X1=X1, X2=X2, U=U, Nks=object$gfix,
-                              Qs=Qs, constraints=loop.const, mq.phi=mq.phi,
-                              tsf=tsf, tsf.ind=tsf.ind, mySolver=object$mySolver,
-                              verbose=verbose[2], all_pair=all_pair, dvar=object$ssq, ... )
-        
-        idx <- which(clme.temp$ts.glb > ts.boot)
-        if( length(idx)>0 ){
-          ts.boot[idx] <- clme.temp$ts.glb[idx]
-        }
-        
-        update.ind <- (MNK==1) + (mnk == est_order)
-        if( update.ind>0 ){
-          ts.ind.boot <- clme.temp$ts.ind 
+        set.seed(m + seed);
+
+        ts.boot <- -Inf;
+
+        for (mnk in 1:MNK) {
+          if (cust_const == FALSE) {
+            grid.row <- list(order=search.grid[mnk, 1],
+              node=search.grid[mnk, 3], decreasing=search.grid[mnk, 2]);
+            loop.const <- create.constraints(P1=P1, constraints=grid.row);
+          }
+          clme.temp <- clme_em(Y=Y_boot_col, X1=X1,
+            X2=X2, U=U, Nks=object$gfix, Qs=Qs,
+            constraints=loop.const, mq.phi=mq.phi,
+            tsf=tsf, tsf.ind=tsf.ind, mySolver=object$mySolver,
+            verbose=verbose[2], all_pair=all_pair,
+            dvar=object$ssq, ...);
+          idx <- which(clme.temp$ts.glb > ts.boot);
+          if (length(idx) > 0) {
+            ts.boot[idx] <- clme.temp$ts.glb[idx];
+          }
+          update.ind <- (MNK == 1) + (mnk == est_order);
+          if (update.ind > 0) {
+            ts.ind.boot <- clme.temp$ts.ind;
+          }
         }
 
+        ## Here we simply return 1 or 0 to indicate whether the
+        ## p.value criteria were met, we call them counts "ct"
+        ## and we will use the sum later in processing.
+        if (all_pair == TRUE) {
+          p.value.ct <- 1 * (ts.boot >= abs(object$ts.glb)) +
+            1 * (ts.boot <= -abs(object$ts.glb));
+          pval.ind.ct <- 1 * (ts.ind.boot >= abs(object$ts.ind)) +
+            1 * (ts.ind.boot <= -abs(object$ts.ind));
+        } else {
+          p.value.ct <- 1 * (ts.boot >= object$ts.glb);
+          pval.ind.ct <- 1 * (ts.ind.boot >= object$ts.ind);
+        }
+
+        ## Note: we combine p.value.ct and pval.ind.ct, since we know
+        ## the length and order, and it is convenient to return one
+        ## vector which we easily convert to a single data matrix during
+        ## the foreach() processing.
+        c(p.value.ct, pval.ind.ct);
+
       }
-      
-      # Compute p-values
-      if( all_pair==TRUE ){
-        p.value  <- p.value  + 1*( ts.boot    >= abs(object$ts.glb) ) + 1*( ts.boot    <= -abs(object$ts.glb) )
-        pval.ind <- pval.ind + 1*(ts.ind.boot >= abs(object$ts.ind) ) + 1*(ts.ind.boot <= -abs(object$ts.ind) )
-      } else{
-        # The default / original: one-sided inference
-        p.value  <- p.value  + 1*( ts.boot    >= object$ts.glb )
-        pval.ind <- pval.ind + 1*(ts.ind.boot >= object$ts.ind )
-      }
-      
-      
-      # Collect test stats
-      TS.boot[m,]     <- ts.boot
-      TS.boot.ind[m,] <- ts.ind.boot
-      
+
+      PvalueV <- colSums(PvalueM);
+
+      p.value <- PvalueV[seq_len(length(object$ts.glb))];
+      pval.ind <- PvalueV[-seq_len(length(object$ts.glb))];
+      ## Define the p.value by the fraction of times
+      ## the criteria were met.
+      object$p.value <- p.value/nsim2;
+      object$p.value.ind <- pval.ind/nsim2;
+
     }
-    
-    object$p.value     <- p.value/nsim2
-    object$p.value.ind <- pval.ind/nsim2
-    
+
     ## End of the SEQUENTIAL BOOTSTRAP LOOP
-  } else{
+  } else {
     object$p.value     <- NA
     object$p.value.ind <- rep( NA, nrow(est_const$A) )
   }

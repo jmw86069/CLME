@@ -10,6 +10,8 @@ PROJECTED DEVELOPMENT:
 - Add argument to not bootstrap the random effect residuals. See Morris (2002) doi:10.1016/S0167-7152(02)00041-X
   - How does lme4 handle this, just use the exact random effects?
 - Enable parallel processing for the bootstrap samples (foreach, dopar).
+- jmw86069 began implementing foreach parallel processing for the
+  bootstrap samples.
 
 ===========================
 VERSION HISTORY:
