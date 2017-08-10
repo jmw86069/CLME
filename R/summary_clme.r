@@ -55,7 +55,7 @@ summary.clme <- function(
   object,
   nsim=1000,
   seed=42,
-  useParallel=FALSE,
+  useParallel=TRUE,
   verbose=c(FALSE,FALSE),
   ... )
 {
