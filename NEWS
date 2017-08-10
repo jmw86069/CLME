@@ -14,7 +14,7 @@ PROJECTED DEVELOPMENT:
 ===========================
 VERSION HISTORY:
 
-Version 2.0-7, 2017-09-10
+Version 2.0-6, 2017-09-10
 - Enable parallel processing by summary.clme() by James M. Ward jmw86069.
 
 Version 2.0-4, 2015-07-01
